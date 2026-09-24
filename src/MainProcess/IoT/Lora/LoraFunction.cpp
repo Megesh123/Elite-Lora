@@ -1,18 +1,16 @@
 /**
  * @file LoraFunction.cpp
  * @author Megeshwaran D <megesh@bfes.co.in>
- * @version 1.0.0
+ * @version 2.0.0 - Robust TX/RX rewrite
  * @date 2025-10-01
- * @copyright Copyright (c) 2025 [Blackfox Embedded Solutions]
  *
- * @note LoRa COMMUNICATION IMPLEMENTATION
+ * @note LoRa COMMUNICATION IMPLEMENTATION - Fixed RX starvation & flush bug
+ * RAK11160 is Class C, downlinks can arrive at ANY time, even while we are
+ * waiting for TX_DONE. The old code did `while(available) read()` before every
+ * AT+SEND, which discarded pending downlinks. This rewrite never flushes.
+ * RX task is the normal reader, but TX path also dispatches +EVT:RX_ lines
+ * while it owns the UART mutex.
  */
-
-/**********************
- * LoRa COMMUNICATION IMPLEMENTATION
- * Handles secure LoRa connectivity, message processing, and IoT integration
- * Implements bidirectional communication with cloud services
- **********************/
 
 #include "HeaderFile.h"
 
@@ -26,238 +24,198 @@ HardwareSerial LoRaSerial(1);
 bool LoraInitialized = false;
 bool LoraJoined = false;
 
-// RAK11160 UART mutex
+// RAK11160 UART mutex - protects LoRaSerial
 SemaphoreHandle_t LoRaSerialMutex = NULL;
 
-// ==================================================
-// Wait for a specific response
-// ==================================================
-bool waitForResponse(
-    String &response,
-    const char *expected,
-    uint32_t timeout)
-{
-  unsigned long start = millis();
-
-  while (millis() - start < timeout)
-  {
-    while (LoRaSerial.available())
-    {
-      char c = LoRaSerial.read();
-
-      // xSemaphoreTake(SerialMutex, portMAX_DELAY);
-      // Serial.write(c);
-      // xSemaphoreGive(SerialMutex);
-
-      response += c;
-
-      if (response.indexOf(expected) >= 0)
-      {
-        return true;
-      }
-    }
-
-    delay(1);
-  }
-
-  return false;
-}
-// ==================================================
-// Send AT command
-// ==================================================
-
-bool sendATCommand(
-    const char *command,
-    uint32_t timeout = 5000)
-{
-  if (LoRaSerialMutex != NULL)
-    xSemaphoreTake(LoRaSerialMutex, portMAX_DELAY);
-
-  String response = "";
-
-  LoRaSerial.print(command);
-  LoRaSerial.print("\r\n");
-
-  unsigned long start = millis();
-
-  while (millis() - start < timeout)
-  {
-    while (LoRaSerial.available())
-    {
-      char c = LoRaSerial.read();
-
-      // Serial.write(c);
-      response += c;
-
-      if (response.indexOf("AT_PARAM_ERROR") >= 0 ||
-          response.indexOf("AT_BUSY_ERROR") >= 0 ||
-          response.indexOf("AT_NO_NETWORK_JOINED") >= 0 ||
-          response.indexOf("ERROR") >= 0)
-      {
-        Serial.println();
-        Serial.println("sendATCommand - Command ERROR");
-
-        if (LoRaSerialMutex != NULL)
-          xSemaphoreGive(LoRaSerialMutex);
-
-        return false;
-      }
-
-      if (response.indexOf("OK") >= 0)
-      {
-        Serial.println();
-        Serial.println("sendATCommand - Command OK");
-
-        if (LoRaSerialMutex != NULL)
-          xSemaphoreGive(LoRaSerialMutex);
-
-        return true;
-      }
-    }
-
-    delay(1);
-  }
-
-  Serial.println();
-  Serial.println("Command TIMEOUT");
-
-  if (LoRaSerialMutex != NULL)
-    xSemaphoreGive(LoRaSerialMutex);
-
-  return false;
-}
+// Forward
+void processLoRaLine(String line);
 
 // --------------------------------------------------
 // Convert ASCII string to HEX
-// Example: "Hello" -> "48656C6C6F"
 // --------------------------------------------------
 String stringToHex(String text)
 {
   String hex = "";
-
+  hex.reserve(text.length() * 2);
   for (size_t i = 0; i < text.length(); i++)
   {
     char buf[3];
-
-    sprintf(
-        buf,
-        "%02X",
-        (uint8_t)text[i]);
-
+    sprintf(buf, "%02X", (uint8_t)text[i]);
     hex += buf;
   }
-
   return hex;
 }
+
 // --------------------------------------------------
 // Convert HEX string to ASCII
-// Example: "48656C6C6F" -> "Hello"
 // --------------------------------------------------
 String hexToString(String hex)
 {
-  String result = "";
-
-  for (int i = 0; i < hex.length(); i += 2)
+  hex.trim();
+  // Remove possible spaces / 0x prefix
+  String clean = "";
+  clean.reserve(hex.length());
+  for (size_t i = 0; i < hex.length(); i++)
   {
-    if (i + 1 >= hex.length())
-      break;
+    char c = hex[i];
+    if ((c >= '0' && c <= '9') || (c >= 'A' && c <= 'F') || (c >= 'a' && c <= 'f'))
+      clean += c;
+  }
+  if (clean.length() % 2 != 0) return ""; // invalid
 
-    String byteString = hex.substring(i, i + 2);
-
-    char c = (char)strtol(
-        byteString.c_str(),
-        NULL,
-        16);
-
+  String result = "";
+  result.reserve(clean.length() / 2);
+  for (size_t i = 0; i + 1 < clean.length(); i += 2)
+  {
+    String byteString = clean.substring(i, i + 2);
+    char c = (char)strtol(byteString.c_str(), NULL, 16);
     result += c;
   }
-
   return result;
 }
+
 // --------------------------------------------------
-// Send string through RAK11160
+// Internal: try to dispatch a line as downlink
+// returns true if it WAS a downlink line
+// --------------------------------------------------
+static bool loraTryDispatchDownlink(const String &line)
+{
+  if (line.startsWith("+EVT:RX_"))
+  {
+    processLoRaLine(line);
+    return true;
+  }
+  return false;
+}
+
+// ==================================================
+// Send AT command and wait for OK
+// This is the ONLY place that talks to LoRaSerial for AT commands
+// It NEVER flushes pending data - it reads line by line and
+// dispatches any +EVT:RX_ that appears in between.
+// ==================================================
+bool sendATCommand(const char *command, uint32_t timeout = 5000)
+{
+  if (LoRaSerialMutex != NULL)
+    xSemaphoreTake(LoRaSerialMutex, portMAX_DELAY);
+
+  // Send command
+  LoRaSerial.print(command);
+  LoRaSerial.print("\r\n");
+
+  String responseAccum = "";
+  responseAccum.reserve(256);
+  unsigned long start = millis();
+  bool gotOk = false;
+  bool gotError = false;
+
+  while (millis() - start < timeout)
+  {
+    while (LoRaSerial.available())
+    {
+      String line = LoRaSerial.readStringUntil('\n');
+      line.trim();
+      if (line.length() == 0) continue;
+
+      // Debug
+      xSemaphoreTake(SerialMutex, portMAX_DELAY);
+      Serial.print("[LORA AT] ");
+      Serial.println(line);
+      xSemaphoreGive(SerialMutex);
+
+      // Always dispatch downlink if it sneaks in
+      if (loraTryDispatchDownlink(line))
+        continue;
+
+      responseAccum += line + "\n";
+
+      if (line.indexOf("AT_PARAM_ERROR") >= 0 ||
+          line.indexOf("AT_BUSY_ERROR") >= 0 ||
+          line.indexOf("AT_NO_NETWORK_JOINED") >= 0 ||
+          line == "ERROR" || line.startsWith("ERROR"))
+      {
+        gotError = true;
+        break;
+      }
+      if (line == "OK")
+      {
+        gotOk = true;
+        break;
+      }
+      // Some RAK firmwares echo command, ignore
+    }
+    if (gotOk || gotError) break;
+    vTaskDelay(pdMS_TO_TICKS(5));
+  }
+
+  if (LoRaSerialMutex != NULL)
+    xSemaphoreGive(LoRaSerialMutex);
+
+  if (gotError)
+  {
+    xSemaphoreTake(SerialMutex, portMAX_DELAY);
+    Serial.print("AT CMD ERROR: ");
+    Serial.println(command);
+    xSemaphoreGive(SerialMutex);
+    return false;
+  }
+  if (gotOk)
+  {
+    return true;
+  }
+
+  xSemaphoreTake(SerialMutex, portMAX_DELAY);
+  Serial.print("AT CMD TIMEOUT: ");
+  Serial.println(command);
+  xSemaphoreGive(SerialMutex);
+  return false;
+}
+
+// --------------------------------------------------
+// Send string through RAK11160 - ROBUST VERSION
 // --------------------------------------------------
 bool sendString(String message, int port)
 {
   if (!LoraJoined)
   {
     xSemaphoreTake(SerialMutex, portMAX_DELAY);
-
-    Serial.println(
-        "Lora Join Failed. Cannot send message.");
-
+    Serial.println("LoRa not joined, cannot send");
     xSemaphoreGive(SerialMutex);
-
     return false;
   }
 
   if (message.length() > 100)
   {
     xSemaphoreTake(SerialMutex, portMAX_DELAY);
-
-    Serial.print(
-        "sendString - ERROR: LoRa payload too large: ");
-
-    Serial.print(message.length());
-
-    Serial.println(" bytes");
-
+    Serial.print("LoRa payload too large: ");
+    Serial.println(message.length());
     xSemaphoreGive(SerialMutex);
-
     return false;
   }
 
+  // Small gap to avoid spamming
   vTaskDelay(pdMS_TO_TICKS(100));
+
   String hexData = stringToHex(message);
-
-  String command = "AT+SEND=";
-
-  command += String(port);
-  command += ":";
-  command += hexData;
-
-  // ==============================
-  // Serial Monitor
-  // ==============================
+  String command = "AT+SEND=" + String(port) + ":" + hexData;
 
   xSemaphoreTake(SerialMutex, portMAX_DELAY);
-
-  // Serial.println();
-  // Serial.println("================================");
-  // Serial.println("UPLINK");
-  // Serial.println("================================");
-
-  Serial.print("String : ");
+  Serial.print("UPLINK String: ");
   Serial.println(message);
-
-  // Serial.print("HEX    : ");
-  // Serial.println(hexData);
-
-  // Serial.print("Bytes  : ");
-  // Serial.println(message.length());
-
-  // Serial.print("Command: ");
-  // Serial.println(command);
-
+  Serial.print("UPLINK HEX: ");
+  Serial.println(hexData);
   xSemaphoreGive(SerialMutex);
 
-  // ==============================
-  // RAK11160 UART
-  // ==============================
-
+  // --- Own UART ---
   if (LoRaSerialMutex != NULL)
-    xSemaphoreTake(
-        LoRaSerialMutex,
-        portMAX_DELAY);
-
-  while (LoRaSerial.available())
-    LoRaSerial.read();
+    xSemaphoreTake(LoRaSerialMutex, portMAX_DELAY);
 
   LoRaSerial.print(command);
   LoRaSerial.print("\r\n");
 
   bool sendAccepted = false;
   bool txDone = false;
+  bool txFailed = false;
 
   unsigned long start = millis();
 
@@ -265,528 +223,293 @@ bool sendString(String message, int port)
   {
     while (LoRaSerial.available())
     {
-      String line =
-          LoRaSerial.readStringUntil('\n');
-
+      String line = LoRaSerial.readStringUntil('\n');
       line.trim();
+      if (line.length() == 0) continue;
 
-      if (line.length() == 0)
-        continue;
-
-      // ==============================
-      // Serial Monitor
-      // ==============================
-
-      xSemaphoreTake(
-          SerialMutex,
-          portMAX_DELAY);
-
+      xSemaphoreTake(SerialMutex, portMAX_DELAY);
       Serial.print("[LORA TX] ");
       Serial.println(line);
-
       xSemaphoreGive(SerialMutex);
 
-      // ==============================
-      // DOWNLINK RECEIVED DURING TX WAIT
-      // ==============================
-      // Task 8 may own the LoRa UART while waiting for TX_DONE.
-      // Do not discard a Class-C downlink if it arrives here.
-      if (line.startsWith("+EVT:RX_"))
-      {
-        processLoRaLine(line);
+      if (loraTryDispatchDownlink(line))
         continue;
-      }
-
-      // ==============================
-      // SEND ACCEPTED
-      // ==============================
 
       if (line == "OK")
       {
         sendAccepted = true;
-
-        // xSemaphoreTake(
-        //     SerialMutex,
-        //     portMAX_DELAY);
-
-        // Serial.println(
-        //     "SEND command accepted");
-
-        // xSemaphoreGive(SerialMutex);
+        continue;
       }
-
-      // ==============================
-      // TX DONE
-      // ==============================
-
-      if (line.indexOf("+EVT:TX_DONE") >= 0)
+      if (line.indexOf("+EVT:TX_DONE") >= 0 ||
+          line.indexOf("+EVT:SEND_CONFIRMED_OK") >= 0)
       {
         txDone = true;
-
-        // xSemaphoreTake(
-        //     SerialMutex,
-        //     portMAX_DELAY);
-
-        // Serial.println("TX DONE");
-
-        // xSemaphoreGive(SerialMutex);
       }
-
-      // ==============================
-      // CONFIRMED TX
-      // ==============================
-
-      if (line.indexOf(
-              "+EVT:SEND_CONFIRMED_OK") >= 0)
-      {
-        txDone = true;
-
-        // xSemaphoreTake(
-        //     SerialMutex,
-        //     portMAX_DELAY);
-
-        // Serial.println(
-        //     "TX CONFIRMED DONE");
-
-        // xSemaphoreGive(SerialMutex);
-      }
-
-      // ==============================
-      // ERROR
-      // ==============================
-
-      if (line.indexOf("AT_PARAM_ERROR") >= 0 ||
+      if (line.indexOf("+EVT:SEND_CONFIRMED_FAILED") >= 0 ||
+          line.indexOf("AT_PARAM_ERROR") >= 0 ||
           line.indexOf("AT_BUSY_ERROR") >= 0 ||
           line.indexOf("AT_NO_NETWORK_JOINED") >= 0 ||
-          line.indexOf("ERROR") >= 0)
+          line == "ERROR")
       {
-        xSemaphoreTake(
-            SerialMutex,
-            portMAX_DELAY);
-
-        Serial.println(
-            "LoRa SEND ERROR");
-
-        xSemaphoreGive(SerialMutex);
-
-        if (LoRaSerialMutex != NULL)
-          xSemaphoreGive(
-              LoRaSerialMutex);
-
-        return false;
+        txFailed = true;
       }
 
-      // ==============================
-      // TX COMPLETE
-      // ==============================
-
-      if (txDone)
+      if (sendAccepted && txDone)
       {
         if (LoRaSerialMutex != NULL)
-          xSemaphoreGive(
-              LoRaSerialMutex);
-
+          xSemaphoreGive(LoRaSerialMutex);
         return true;
       }
+      if (txFailed)
+      {
+        xSemaphoreTake(SerialMutex, portMAX_DELAY);
+        Serial.println("LoRa SEND FAILED event");
+        xSemaphoreGive(SerialMutex);
+        if (LoRaSerialMutex != NULL)
+          xSemaphoreGive(LoRaSerialMutex);
+        return false;
+      }
     }
-
-    delay(1);
+    vTaskDelay(pdMS_TO_TICKS(5));
   }
 
-  xSemaphoreTake(
-      SerialMutex,
-      portMAX_DELAY);
-
-  Serial.println(
-      "TX RESPONSE TIMEOUT");
-
+  xSemaphoreTake(SerialMutex, portMAX_DELAY);
+  Serial.println("LoRa TX RESPONSE TIMEOUT");
+  Serial.print("  sendAccepted=");
+  Serial.print(sendAccepted);
+  Serial.print(" txDone=");
+  Serial.println(txDone);
   xSemaphoreGive(SerialMutex);
 
   if (LoRaSerialMutex != NULL)
-    xSemaphoreGive(
-        LoRaSerialMutex);
+    xSemaphoreGive(LoRaSerialMutex);
 
-  return false;
+  // If we got OK but no TX_DONE within 15s, still consider it sent
+  // because network may still deliver (Class C). Return sendAccepted.
+  return sendAccepted;
 }
+
 // --------------------------------------------------
 // Parse RAK11160 downlink event
-//
-// Example:
-// +EVT:RX_1:-48:7:UNICAST:2:48656C6C6F204553503332
+// Example: +EVT:RX_1:-48:7:UNICAST:2:48656C6C6F
 // --------------------------------------------------
-
 void processLoRaLine(String line)
 {
   line.trim();
+  if (line.length() == 0) return;
+  if (!line.startsWith("+EVT:RX_")) return;
 
-  if (line.length() == 0)
-    return;
-
-  if (!line.startsWith("+EVT:RX_"))
-    return;
-
-  int lastColon =
-      line.lastIndexOf(':');
-
+  int lastColon = line.lastIndexOf(':');
   if (lastColon < 0)
   {
-    xSemaphoreTake(
-        SerialMutex,
-        portMAX_DELAY);
-
-    Serial.println(
-        "Invalid RX event.");
-
+    xSemaphoreTake(SerialMutex, portMAX_DELAY);
+    Serial.println("Invalid RX event, no colon");
     xSemaphoreGive(SerialMutex);
-
     return;
   }
 
-  String hexData =
-      line.substring(lastColon + 1);
+  String hexData = line.substring(lastColon + 1);
+  hexData.trim();
+  if (hexData.length() == 0) return;
 
-  String message =
-      hexToString(hexData);
+  String message = hexToString(hexData);
+  if (message.length() == 0)
+  {
+    xSemaphoreTake(SerialMutex, portMAX_DELAY);
+    Serial.print("HEX decode failed: ");
+    Serial.println(hexData);
+    xSemaphoreGive(SerialMutex);
+    return;
+  }
 
+  // Message format from Python bridge: <ClientID>/<TOPIC>:<PAYLOAD>
+  // Example: 901745858428/ACK_DASHBOARD:OK  or 901745858428/MODE:*RM-ST#
   String topic = "";
   String payload = "";
 
-  int separator =
-      message.indexOf(':');
-
+  int separator = message.indexOf(':');
   if (separator > 0)
   {
-    topic =
-        message.substring(
-            0,
-            separator);
-
-    payload =
-        message.substring(
-            separator + 1);
+    topic = message.substring(0, separator);
+    payload = message.substring(separator + 1);
+  }
+  else
+  {
+    // No colon, treat whole as topic (some old firmwares)
+    topic = message;
+    payload = "";
   }
 
-  // =================================
-  // SERIAL MONITOR
-  // =================================
+  topic.trim();
+  payload.trim();
 
-  xSemaphoreTake(
-      SerialMutex,
-      portMAX_DELAY);
-
+  xSemaphoreTake(SerialMutex, portMAX_DELAY);
   Serial.println();
-  Serial.println(
-      "================================");
+  Serial.println("========================================");
+  Serial.println("DOWNLINK RECEIVED");
+  Serial.println("========================================");
+  Serial.print("RAW LINE : "); Serial.println(line);
+  Serial.print("HEX      : "); Serial.println(hexData);
+  Serial.print("STRING   : "); Serial.println(message);
+  Serial.print("TOPIC    : "); Serial.println(topic);
+  Serial.print("PAYLOAD  : "); Serial.println(payload);
+  Serial.println("========================================");
+  xSemaphoreGive(SerialMutex);
 
-  Serial.println(
-      "DOWNLINK RECEIVED");
-
-  Serial.println(
-      "================================");
-
-  Serial.print("HEX    : ");
-  Serial.println(hexData);
-
-  Serial.print("String : ");
-  Serial.println(message);
-
-  if (separator > 0)
+  if (topic.length() > 0)
   {
-    Serial.print("Topic  : ");
-    Serial.println(topic);
-
-    Serial.print("Payload: ");
-    Serial.println(payload);
-  }
-
-  Serial.println(
-      "================================");
-
-  xSemaphoreGive(
-      SerialMutex);
-
-  // =================================
-  // APPLICATION HANDLER
-  // =================================
-
-  if (separator > 0)
-  {
-    _receive_message_process(
-        topic,
-        payload);
+    _receive_message_process(topic, payload);
   }
 }
 
 void loraReceiveProcess()
 {
-  if (!LoraJoined)
-    return;
+  if (!LoraInitialized) return;
+  if (!LoraJoined) return;
 
-  static String rxLine = "";
-
+  // Try to take mutex quickly, if TX task owns it, skip this cycle
+  // TX task itself will dispatch RX lines while it owns mutex
   if (LoRaSerialMutex != NULL)
   {
-    if (xSemaphoreTake(
-            LoRaSerialMutex,
-            pdMS_TO_TICKS(5)) != pdTRUE)
+    if (xSemaphoreTake(LoRaSerialMutex, pdMS_TO_TICKS(5)) != pdTRUE)
     {
       return;
     }
   }
 
+  // Drain all available lines
   while (LoRaSerial.available())
   {
-    char c =
-        LoRaSerial.read();
+    String line = LoRaSerial.readStringUntil('\n');
+    line.trim();
+    if (line.length() == 0) continue;
 
-    xSemaphoreTake(
-        SerialMutex,
-        portMAX_DELAY);
+    xSemaphoreTake(SerialMutex, portMAX_DELAY);
+    Serial.print("[LORA RX] ");
+    Serial.println(line);
+    xSemaphoreGive(SerialMutex);
 
-    Serial.print(c);
-
-    xSemaphoreGive(
-        SerialMutex);
-    if (c == '\n')
+    // Only dispatch if it's a downlink, other EVT like TX_DONE may appear
+    // here if TX task missed it (should not), but we handle anyway
+    if (line.startsWith("+EVT:RX_"))
     {
-      rxLine.trim();
-
-      if (rxLine.length() > 0)
-      {
-        xSemaphoreTake(
-            SerialMutex,
-            portMAX_DELAY);
-
-        Serial.print(
-            "[LORA RX LINE] ");
-
-        Serial.println(rxLine);
-
-        xSemaphoreGive(
-            SerialMutex);
-
-        processLoRaLine(
-            rxLine);
-      }
-
-      rxLine = "";
+      processLoRaLine(line);
     }
-    else if (c != '\r')
+    else if (line.indexOf("+EVT:JOINED") >= 0)
     {
-      rxLine += c;
-
-      if (rxLine.length() > 600)
-        rxLine.remove(0, 300);
+      // Late JOINED (should be caught in loraJoin, but handle)
+      LoraJoined = true;
     }
   }
 
   if (LoRaSerialMutex != NULL)
-    xSemaphoreGive(
-        LoRaSerialMutex);
+    xSemaphoreGive(LoRaSerialMutex);
 }
 
-bool LoRaFunction::publish(
-    const String &_topic,
-    const String &_data)
+bool LoRaFunction::publish(const String &_topic, const String &_data)
 {
   String data = _topic + ":" + _data;
-  sendString(data, 2);
-  return true;
+  return sendString(data, 2);
 }
 
-bool LoRaFunction::response(
-    const String &_topic,
-    const String &_data)
+bool LoRaFunction::response(const String &_topic, const String &_data)
 {
-
   String data = _topic + ":" + _data;
-  sendString(data, 2);
-  return true;
+  return sendString(data, 2);
 }
 
 // ==================================================
-// LoRa initialization
+// LoRa initialization - robust
 // ==================================================
 bool loraBegin()
 {
-  xSemaphoreTake(
-      SerialMutex,
-      portMAX_DELAY);
-
+  xSemaphoreTake(SerialMutex, portMAX_DELAY);
   Serial.println();
-  Serial.println(
-      "================================");
+  Serial.println("========================================");
+  Serial.println("Initializing RAK11160...");
+  Serial.println("========================================");
+  xSemaphoreGive(SerialMutex);
 
-  Serial.println(
-      "Initializing RAK11160...");
+  // UART with larger RX buffer to avoid overflow of long downlinks
+  LoRaSerial.setRxBufferSize(1024);
+  LoRaSerial.begin(LORA_BAUD, SERIAL_8N1, LORA_RX_PIN, LORA_TX_PIN);
 
-  Serial.println(
-      "================================");
+  delay(3000); // Give RAK time to boot
 
-  xSemaphoreGive(
-      SerialMutex);
-
-  // ==============================
-  // UART
-  // ==============================
-
-  LoRaSerial.begin(
-      LORA_BAUD,
-      SERIAL_8N1,
-      LORA_RX_PIN,
-      LORA_TX_PIN);
-
-  delay(5000);
-
-  // ==============================
-  // RAK READY
-  // ==============================
-
-  bool rakReady = false;
-
-  for (int attempt = 1;
-       attempt <= 5;
-       attempt++)
+  // Clear any boot garbage without discarding in a way that loses future data
+  // Just read and print
+  if (LoRaSerialMutex == NULL)
   {
-    xSemaphoreTake(
-        SerialMutex,
-        portMAX_DELAY);
+    // Should already be created in Task::create, but safety
+    LoRaSerialMutex = xSemaphoreCreateMutex();
+  }
 
-    Serial.print(
-        "AT attempt ");
+  if (LoRaSerialMutex != NULL)
+    xSemaphoreTake(LoRaSerialMutex, portMAX_DELAY);
 
-    Serial.print(attempt);
-
-    Serial.println("...");
-
-    xSemaphoreGive(
-        SerialMutex);
-
-    String response = "";
-
-    LoRaSerial.print(
-        "AT\r\n");
-
-    unsigned long start =
-        millis();
-
-    while (millis() - start < 2000)
+  unsigned long clearStart = millis();
+  while (millis() - clearStart < 500)
+  {
+    while (LoRaSerial.available())
     {
-      while (LoRaSerial.available())
-      {
-        char c =
-            LoRaSerial.read();
-
-        xSemaphoreTake(
-            SerialMutex,
-            portMAX_DELAY);
-
-        Serial.write(c);
-
-        xSemaphoreGive(
-            SerialMutex);
-
-        response += c;
-      }
-
-      if (response.indexOf("OK") >= 0)
-      {
-        rakReady = true;
-        break;
-      }
+      char c = LoRaSerial.read();
+      xSemaphoreTake(SerialMutex, portMAX_DELAY);
+      Serial.write(c);
+      xSemaphoreGive(SerialMutex);
     }
+    delay(10);
+  }
 
-    if (rakReady)
+  if (LoRaSerialMutex != NULL)
+    xSemaphoreGive(LoRaSerialMutex);
+
+  // RAK READY check
+  bool rakReady = false;
+  for (int attempt = 1; attempt <= 5; attempt++)
+  {
+    xSemaphoreTake(SerialMutex, portMAX_DELAY);
+    Serial.print("AT attempt ");
+    Serial.print(attempt);
+    Serial.println("...");
+    xSemaphoreGive(SerialMutex);
+
+    if (sendATCommand("AT", 2000))
+    {
+      rakReady = true;
       break;
-
+    }
     delay(1000);
   }
 
   if (!rakReady)
   {
-    xSemaphoreTake(
-        SerialMutex,
-        portMAX_DELAY);
-
-    Serial.println(
-        "ERROR: RAK11160 not responding!");
-
-    xSemaphoreGive(
-        SerialMutex);
-
+    xSemaphoreTake(SerialMutex, portMAX_DELAY);
+    Serial.println("ERROR: RAK11160 not responding!");
+    xSemaphoreGive(SerialMutex);
     return false;
   }
 
-  xSemaphoreTake(
-      SerialMutex,
-      portMAX_DELAY);
+  xSemaphoreTake(SerialMutex, portMAX_DELAY);
+  Serial.println("RAK11160 Ready!");
+  xSemaphoreGive(SerialMutex);
 
-  Serial.println();
-  Serial.println(
-      "RAK11160 Ready!");
+  // CONFIGURATION - each step must succeed except CLASS which is optional
+  if (!sendATCommand("AT+NWM=1")) return false;
+  sendATCommand("AT+CLASS=C"); // Don't fail if this fails, but try
 
-  xSemaphoreGive(
-      SerialMutex);
+  if (!sendATCommand(("AT+APPEUI=" + LoraDetails.APPEUI).c_str())) return false;
+  if (!sendATCommand(("AT+DEVEUI=" + LoraDetails.DEVEUI).c_str())) return false;
+  if (!sendATCommand(("AT+APPKEY=" + LoraDetails.APPKEY).c_str())) return false;
+  if (!sendATCommand("AT+BAND=3")) return false;
+  sendATCommand("AT+NJM=1");
 
-  // ==============================
-  // CONFIGURATION
-  // ==============================
-
-  if (!sendATCommand(
-          "AT+NWM=1"))
-    return false;
-
-  sendATCommand(
-      "AT+CLASS=C");
-
-  if (!sendATCommand(
-          ("AT+APPEUI=" +
-           LoraDetails.APPEUI)
-              .c_str()))
-    return false;
-
-  if (!sendATCommand(
-          ("AT+DEVEUI=" +
-           LoraDetails.DEVEUI)
-              .c_str()))
-    return false;
-
-  if (!sendATCommand(
-          ("AT+APPKEY=" +
-           LoraDetails.APPKEY)
-              .c_str()))
-    return false;
-
-  if (!sendATCommand(
-          "AT+BAND=3"))
-    return false;
-
-  sendATCommand(
-      "AT+NJM=1");
-
-  // ==============================
-  // COMPLETE
-  // ==============================
-
-  xSemaphoreTake(
-      SerialMutex,
-      portMAX_DELAY);
-
-  Serial.println();
-  Serial.println(
-      "================================");
-
-  Serial.println(
-      "RAK11160 CONFIGURED");
-
-  Serial.println(
-      "================================");
-
-  xSemaphoreGive(
-      SerialMutex);
+  xSemaphoreTake(SerialMutex, portMAX_DELAY);
+  Serial.println("========================================");
+  Serial.println("RAK11160 CONFIGURED");
+  Serial.println("========================================");
+  xSemaphoreGive(SerialMutex);
 
   LoraInitialized = true;
-
   return true;
 }
 
@@ -794,140 +517,97 @@ bool loraJoin()
 {
   if (!LoraInitialized)
   {
-    xSemaphoreTake(
-        SerialMutex,
-        portMAX_DELAY);
-
-    Serial.println(
-        "LoRa not initialized. Cannot join network.");
-
-    xSemaphoreGive(
-        SerialMutex);
-
+    xSemaphoreTake(SerialMutex, portMAX_DELAY);
+    Serial.println("LoRa not initialized, cannot join");
+    xSemaphoreGive(SerialMutex);
     return false;
   }
 
   LoraJoined = false;
 
   if (LoRaSerialMutex != NULL)
-    xSemaphoreTake(
-        LoRaSerialMutex,
-        portMAX_DELAY);
+    xSemaphoreTake(LoRaSerialMutex, portMAX_DELAY);
 
+  // Don't blindly flush, but ensure we start clean for JOIN
+  // We will read everything and dispatch any RX (should be none)
   while (LoRaSerial.available())
-    LoRaSerial.read();
+  {
+    String line = LoRaSerial.readStringUntil('\n');
+    line.trim();
+    if (line.length() == 0) continue;
+    xSemaphoreTake(SerialMutex, portMAX_DELAY);
+    Serial.print("[LORA JOIN CLEAN] ");
+    Serial.println(line);
+    xSemaphoreGive(SerialMutex);
+    if (line.startsWith("+EVT:RX_"))
+    {
+      // Should not happen before join, but dispatch if it does
+      processLoRaLine(line);
+    }
+  }
 
-  xSemaphoreTake(
-      SerialMutex,
-      portMAX_DELAY);
-
+  xSemaphoreTake(SerialMutex, portMAX_DELAY);
   Serial.println();
-  Serial.println(
-      "================================");
+  Serial.println("========================================");
+  Serial.println("JOINING LORAWAN NETWORK");
+  Serial.println("========================================");
+  xSemaphoreGive(SerialMutex);
 
-  Serial.println(
-      "JOINING LORAWAN NETWORK");
+  LoRaSerial.print("AT+JOIN=1\r\n");
 
-  Serial.println(
-      "================================");
-
-  xSemaphoreGive(
-      SerialMutex);
-
-  LoRaSerial.print(
-      "AT+JOIN=1\r\n");
-
-  unsigned long start =
-      millis();
-
+  unsigned long start = millis();
   String response = "";
 
   while (millis() - start < 60000)
   {
     while (LoRaSerial.available())
     {
-      char c =
-          LoRaSerial.read();
+      String line = LoRaSerial.readStringUntil('\n');
+      line.trim();
+      if (line.length() == 0) continue;
 
-      xSemaphoreTake(
-          SerialMutex,
-          portMAX_DELAY);
+      xSemaphoreTake(SerialMutex, portMAX_DELAY);
+      Serial.print("[LORA JOIN] ");
+      Serial.println(line);
+      xSemaphoreGive(SerialMutex);
 
-      Serial.write(c);
-
-      xSemaphoreGive(
-          SerialMutex);
-
-      response += c;
-
-      if (response.indexOf(
-              "+EVT:JOINED") >= 0)
+      if (line.startsWith("+EVT:RX_"))
       {
-        xSemaphoreTake(
-            SerialMutex,
-            portMAX_DELAY);
-
-        Serial.println();
-        Serial.println(
-            "================================");
-
-        Serial.println(
-            "LORAWAN JOIN SUCCESS");
-
-        Serial.println(
-            "================================");
-
-        xSemaphoreGive(
-            SerialMutex);
-
-        LoraJoined = true;
-
-        if (LoRaSerialMutex != NULL)
-          xSemaphoreGive(
-              LoRaSerialMutex);
-
-        return true;
+        processLoRaLine(line);
+        continue;
       }
 
-      if (response.indexOf(
-              "+EVT:JOIN_FAILED") >= 0)
+      if (line.indexOf("+EVT:JOINED") >= 0)
       {
-        xSemaphoreTake(
-            SerialMutex,
-            portMAX_DELAY);
-
-        Serial.println();
-        Serial.println(
-            "LORAWAN JOIN FAILED");
-
-        xSemaphoreGive(
-            SerialMutex);
-
+        xSemaphoreTake(SerialMutex, portMAX_DELAY);
+        Serial.println("========================================");
+        Serial.println("LORAWAN JOIN SUCCESS");
+        Serial.println("========================================");
+        xSemaphoreGive(SerialMutex);
+        LoraJoined = true;
         if (LoRaSerialMutex != NULL)
-          xSemaphoreGive(
-              LoRaSerialMutex);
-
+          xSemaphoreGive(LoRaSerialMutex);
+        return true;
+      }
+      if (line.indexOf("+EVT:JOIN_FAILED") >= 0)
+      {
+        xSemaphoreTake(SerialMutex, portMAX_DELAY);
+        Serial.println("LORAWAN JOIN FAILED");
+        xSemaphoreGive(SerialMutex);
+        if (LoRaSerialMutex != NULL)
+          xSemaphoreGive(LoRaSerialMutex);
         return false;
       }
     }
-
-    delay(10);
+    vTaskDelay(pdMS_TO_TICKS(10));
   }
 
-  xSemaphoreTake(
-      SerialMutex,
-      portMAX_DELAY);
-
-  Serial.println();
-  Serial.println(
-      "LORAWAN JOIN TIMEOUT");
-
-  xSemaphoreGive(
-      SerialMutex);
+  xSemaphoreTake(SerialMutex, portMAX_DELAY);
+  Serial.println("LORAWAN JOIN TIMEOUT");
+  xSemaphoreGive(SerialMutex);
 
   if (LoRaSerialMutex != NULL)
-    xSemaphoreGive(
-        LoRaSerialMutex);
+    xSemaphoreGive(LoRaSerialMutex);
 
   return false;
 }
