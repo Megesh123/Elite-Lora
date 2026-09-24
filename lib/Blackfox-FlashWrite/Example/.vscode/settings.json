@@ -1,0 +1,10 @@
+{
+    "files.associations": {
+        "optional": "cpp",
+        "random": "cpp",
+        "limits": "cpp",
+        "new": "cpp",
+        "cmath": "cpp",
+        "utility": "cpp"
+    }
+}

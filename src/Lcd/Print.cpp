@@ -1,0 +1,124 @@
+#include "Headerfile.h"
+
+const char *PRINT_CAPACITY = "CAPACITY : ";                    // Label for capacity field
+const char *PRINT_GRAM = "CC";                                  // Unit token for grams
+const char *PRINT_NO_OF_OUTLET = "NO OF OUTLETS : ";           // Label for number of outlets
+const char *PRINT_DISCHARGE = "LUB DIS : ";                    // Label for discharge value
+const char *PRINT_PAUSE_HOUR = "PTM HOR : ";                   // Label for pause hour value
+const char *PRINT_PAUSE_MIN = "PTM MIN : ";                    // Label for pause minute value
+const char *PRINT_SET_CAPACITY = "SET CAPACITY";               // Command text for capacity set
+const char *PRINT_ASK_REFILL_MODE = "DO YOU WANT TO START";    // Prompt text for refill mode query
+const char *PRINT_REFILL_MODE = "REFILL MODE ?";               // Refill mode title text
+const char *PRINT_YES = "YES";                                 // Generic yes token
+const char *PRINT_NO = "NO";                                   // Generic no token
+const char *PRINT_REFILL_START = "REFILL MODE START";          // Refill start status text
+const char *PRINT_REFILL_STOP = "REFILL MODE STOP";            // Refill stop status text
+const char *PRINT_REFILL_SUCCESS = "REFILL SUCCESSFULLY";      // Refill success message
+const char *PRINT_REFILL_COMPLETED = "COMPLETED";              // Refill completed message
+const char *PRINT_REFILL_STATUS = "STATUS: ";                  // Refill status label
+const char *PRINT_PERCENTAGE_SYSMBOL = "%";                    // Percentage symbol token
+const char *PRINT_REFILL_NOW = "REFILL NOW ?";                 // Refill now prompt
+const char *PRINT_OK_COMPLETED = "[ PRESS OK - COMPLETE ]";    // OK button completed hint
+const char *PRINT_OK_STOP = "[ PRESS OK - STOP ]";             // OK button stop hint
+const char *PRINT_CONFIGURATION = "CONFIGURATION";             // Configuration menu text
+const char *PRINT_SETTING = "SETTING";                         // Setting menu text
+const char *PRINT_REFILL = "REFILL";                           // Refill menu text
+const char *PRINT_RESET = "RESET";                             // Reset menu text
+const char *PRINT_RESET_COMPLETED = "RESET COMPLETED";         // Reset completed message
+const char *PRINT_OK_ON_OFF = "[ PRESS OK ON/OFF ]";           // OK button on/off hint
+const char *PRINT_ON = "ON";                                   // ON state token
+const char *PRINT_OFF = "OFF";                                 // OFF state token
+const char *PRINT_TEST_RUN = "TEST RUN - ";                    // Test run title text
+const char *PRINT_TESTRUN = "TEST RUN";                        // Test run action text
+const char *PRINT_TEST_RUN_INIT = "INITIALIZATION";            // Test run initialization text
+const char *PRINT_NOT_COMPLETED = "    NOT COMPLETED";         // Not completed message
+const char *PRINT_PRESS_BACK = "[ PRESS BACK ]";               // Back button hint
+const char *PRINT_RESERVOIR_LOW_LEVEL = "RESERVOIR LOW LEVEL"; // Reservoir low level alert text
+const char *PRINT_REFILL_NOW_NEED = "REFILL NOW? NEED";        // Refill required alert text
+const char *PRINT_SET_OUTLET = "SET OUTLET";                   // Outlet setup title
+
+const char *PRINT_AMPS = "A";                                        // Current unit in amps
+const char *PRINT_RESET_OK = "[ RESET - OK ]";                       // Reset confirmation hint
+const char *PRINT_ALERT = "ALERT";                                   // Alert title text
+const char *PRINT_ALERT_NAME_OVERLOAD = "OVERLOAD ";                 // Overload alert name line
+const char *PRINT_ALERT_NAME_RESERVOIR_1 = "RESERVOIR";              // Reservoir alert first line
+const char *PRINT_ALERT_NAME_RESERVOIR_2 = "LOW LEVEL";              // Reservoir alert second line
+const char *PRINT_ALERT_NAME_SUPERVISORY_1 = "SUPERVISORY 1";        // Supervisory 1 alert name
+const char *PRINT_ALERT_NAME_SUPERVISORY_2 = "SUPERVISORY 2";        // Supervisory 2 alert name
+const char *PRINT_ALERT_NAME_SUPERVISORY_3 = "SUPERVISORY 3";        // Supervisory 3 alert name
+const char *PRINT_ALERT_NAME_SIGNAL_NOT_DETECTED_1 = "SIGNAL";       // Signal alert first line
+const char *PRINT_ALERT_NAME_SIGNAL_NOT_DETECTED_2 = "NOT DETECTED"; // Signal alert second line
+const char *PRINT_ALERT_NAME_ELEMENT_WEAK = "ELEMENT WEAK";          // Element weak alert name
+const char *PRINT_ALERT_NAME_UNKNOW = "UNKNOW ERROR";                // Unknown alert name
+
+const char *PRINT_ENABLE = "ENABLE";         // Enable state text
+const char *PRINT_ENABLED = "ENABLED";       // Enabled confirmation text
+const char *PRINT_CONNECTING = "CONNECTING"; // Connecting state text
+const char *PRINT_CONNECTED = "CONNECTED";   // Connected state text
+const char *PRINT_RECEIVE = "RECEIVE";       // Receive label text
+const char *PRINT_RECEIVED = "RECEIVED";     // Received status text
+
+const char *PRINT_VOLTAGE = "VOLTAGE: ";                         // Voltage label text
+const char *PRINT_VOLT = "V";                                    // Voltage unit token
+const char *PRINT_CURRENT = "CURRENT: ";                         // Current label text
+const char *PRINT_TOTAL_OPERATION_TIME = "OPT: ";                // Total operation time label
+const char *PRINT_TOTAL_LUBRICATION_DISCHARGE = "LUB: ";         // Total lubrication discharge label
+const char *PRINT_TOTAL_PAUSE_TIME = "PTM: ";                    // Total pause time label
+const char *PRINT_TOTAL_ALERT = "ALERT: ";                       // Total alert label
+const char *PRINT_TOTAL_ALERT_REFILL = "ALT-REF: ";              // Refill alert counter label
+const char *PRINT_TOTAL_ALERT_OVERLOAD = "ALT-OVL: ";            // Overload alert counter label
+const char *PRINT_TOTAL_ALERT_SUPERVISORY_1 = "ALT-SP1 : ";      // Supervisory 1 alert counter label
+const char *PRINT_TOTAL_ALERT_SUPERVISORY_2 = "ALT-SP2 : ";      // Supervisory 2 alert counter label
+const char *PRINT_TOTAL_ALERT_SUPERVISORY_3 = "ALT-SP3 : ";      // Supervisory 3 alert counter label
+const char *PRINT_TOTAL_ALERT_SIGNAL_NOT_DETECTED = "ALT-SND: "; // Signal not detected alert counter label
+const char *PRINT_TOTAL_ALERT_PUMPWEAK_1 = "ALT-PW1: ";          // Pump weak 1 alert counter label
+const char *PRINT_TOTAL_ALERT_PUMPWEAK_2 = "ALT-PW2: ";          // Pump weak 2 alert counter label
+const char *PRINT_TOTAL_ALERT_PUMPWEAK_3 = "ALT-PW3: ";          // Pump weak 3 alert counter label
+const char *PRINT_SYSTEM = "SYSTEM ";                            // System title text
+const char *PRINT_FACTORY_RESET = "FACTORY RESET ";              // Factory reset title text
+
+const char *PRINT_ENTER_PASSWORD = "ENTER PASSWORD";          // Enter password prompt
+const char *PRINT_WRONG_PASSWORD = "WRONG PASSWORD";          // Wrong password alert
+const char *PRINT_DO_YOU_NEED_RESET = "DO YOU NEED RESET";    // Reset confirmation prompt
+const char *PRINT_SUPERVISORY_1_ENABLE = "SP1 : ENABLE";      // SP1 enabled status text
+const char *PRINT_SUPERVISORY_2_ENABLE = "SP2 : ENABLE";      // SP2 enabled status text
+const char *PRINT_SUPERVISORY_3_ENABLE = "SP3 : ENABLE";      // SP3 enabled status text
+const char *PRINT_SUPERVISORY_1_DISABLE = "SP1 : DISABLE";    // SP1 disabled status text
+const char *PRINT_SUPERVISORY_2_DISABLE = "SP2 : DISABLE";    // SP2 disabled status text
+const char *PRINT_SUPERVISORY_3_DISABLE = "SP3 : DISABLE";    // SP3 disabled status text
+const char *PRINT_REFILL_ALERT_ENABLE = "REF ALT : ENABLE";   // Refill alert enabled status text
+const char *PRINT_REFILL_ALERT_DISABLE = "REF ALT : DISABLE"; // Refill alert disabled status text
+const char *PRINT_OTA = "OTA";                                // Percentage label text
+
+const char *PRINT_RESET_TO_SAVE_CHANGES = "RESET TO SAVE CHANGES"; // Reset required to save changes text
+
+const char *PRINT_PRESS_OK = "[ PRESS OK ]"; // OK button hint
+const char *PRINT_ZERO = "0";                // Zero string token
+
+const char HORIZONTAL = 'H'; // Horizontal line direction token
+const char VERTICAL = 'V';   // Vertical line direction token
+
+const char *PRINT_RESERVOIR_LEVEL = "RES LVL";   // Reservoir level label
+const char *PRINT_MODE = "MODE:";                // Mode label
+const char *PRINT_MODE_LUB = "MODE: LUB";        // Lubrication mode label
+const char *PRINT_MODE_PAUSE_TIME = "MODE: PTM"; // Pause time mode label
+const char *PRINT_MODE_REFILL = "MODE: REF";     // Refill mode label
+const char *PRINT_MODE_EMPTY = "MODE: - ";       // Empty mode fallback label
+const char *PRINT_COMPANY_NAME = "MEMOLUB";      // Company name text
+const char *PRINT_GOOD = "GOOD";                 // Good condition text
+const char *PRINT_AVERAGE = "AVG";               // Average condition text
+const char *PRINT_BAD = "BAD";                   // Bad condition text
+const char *PRINT_CALCULATE = "ALY";             // Calculation label text
+const char *PRINT_DISABLE = "DIS";
+const char *PRINT_HYPHEN = "-";                               // Hyphen token
+const char *PRINT_OUTLET_1 = "OUT 1";                         // Outlet 1 label
+const char *PRINT_OUTLET_2 = "OUT 2";                         // Outlet 2 label
+const char *PRINT_OUTLET_3 = "OUT 3";                         // Outlet 3 label
+const char *PRINT_SET_KEY_LOCK_DISABLE_1 = "SET KEY LOCK TO"; // Key lock disable prompt first line
+const char *PRINT_SET_KEY_LOCK_DISABLE_2 = "     'DISABLE'";  // Key lock disable prompt second line
+const char *PRINT_KEY_LOCK_ENABLE = "KEY LOCK ENABLE";        // Key lock enabled status text
+const char *PRINT_KEY_LOCK_DISABLE = "KEY LOCK DISABLE";      // Key lock disabled status text
+
+const char *PRINT_EMPTY = "";              // Empty string token
+const char *PRINT_RIGHT_ARROW = ">";       // Right arrow symbol token
+const char *PRINT_REFILL_IT = "REFILL IT"; // Refill itself label
