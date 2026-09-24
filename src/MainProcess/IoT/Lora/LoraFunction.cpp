@@ -1,7 +1,7 @@
 /**
  * @file LoraFunction.cpp
  * @author Megeshwaran D <megesh@bfes.co.in>
- * @version 2.0.0 - Robust TX/RX rewrite
+ * @version 2.1.0 - TX rate limiting + input sanitization
  * @date 2025-10-01
  *
  * @note LoRa COMMUNICATION IMPLEMENTATION - Fixed RX starvation & flush bug
@@ -10,6 +10,14 @@
  * AT+SEND, which discarded pending downlinks. This rewrite never flushes.
  * RX task is the normal reader, but TX path also dispatches +EVT:RX_ lines
  * while it owns the UART mutex.
+ *
+ * @note v2.1.0 changes:
+ *  - loraSanitize(): strip control/non-ASCII characters, trim and length-cap
+ *    every string that enters processLoRaLine() / _receive_message_process()
+ *    so over-the-air frames cannot inject blank/oversized/malformed commands.
+ *  - loraUplinkAllowed(): TX rate limiter enforcing a minimum gap between
+ *    uplinks and a per-minute duty-cycle cap so LoRaWAN airtime isn't spammed
+ *    by concurrent publish calls.
  */
 
 #include "HeaderFile.h"
@@ -21,14 +29,103 @@ HardwareSerial LoRaSerial(1);
 
 #define LORA_BAUD 115200
 
+// v2.1.0 - LoRaWAN payload budget for RAK11160 (AT+SEND on port 2).
+// App-level payloads are capped lower; this guards decoded downlinks too.
+#define LORA_MAX_PAYLOAD_LEN 100
+
 bool LoraInitialized = false;
 bool LoraJoined = false;
 
 // RAK11160 UART mutex - protects LoRaSerial
 SemaphoreHandle_t LoRaSerialMutex = NULL;
 
+// --------------------------------------------------
+// v2.1.0 TX RATE LIMITER
+// LoRaWAN duty-cycle rules and the RAK11160's small TX window mean
+// back-to-back uplinks get dropped server-side silently. Enforce both a
+// minimum inter-uplink gap and a per-minute message budget.
+// --------------------------------------------------
+#define LORA_TX_MIN_INTERVAL_MS 2000 // Minimum gap between two uplinks
+#define LORA_TX_MAX_PER_MIN 15       // Max uplinks allowed per 60s window
+
+// Sliding 60-second window bookkeeping (millis() based - resets on boot)
+static uint32_t loraTxLastMillis = 0;
+static bool loraTxHasSent = false;
+static uint32_t loraTxWindowStartMillis = 0;
+static bool loraTxWindowActive = false;
+static uint16_t loraTxWindowCount = 0;
+
 // Forward
 void processLoRaLine(String line);
+
+// --------------------------------------------------
+// v2.1.0 Sanitize a string before it is processed:
+//  - strip control characters and bytes >= 0x7F (keeps printable ASCII, 0x20-0x7E)
+//  - trim leading/trailing whitespace
+//  - cap length so oversized / truncated frames can't be dispatched
+// --------------------------------------------------
+String loraSanitize(String input)
+{
+  input.trim();
+  // First pass: drop all non-printable-ASCII characters in place.
+  String clean = "";
+  clean.reserve(input.length());
+  for (size_t i = 0; i < input.length(); i++)
+  {
+    char c = input[i];
+    if ((unsigned char)c >= 0x20 && (unsigned char)c <= 0x7E)
+      clean += c;
+  }
+  if (clean.length() > LORA_MAX_PAYLOAD_LEN)
+  {
+    clean = clean.substring(0, LORA_MAX_PAYLOAD_LEN);
+  }
+  return clean;
+}
+
+// --------------------------------------------------
+// v2.1.0 Rate-limit gate for outgoing uplinks.
+// Returns true only if the minimum inter-uplink interval has elapsed AND the
+// per-minute budget has not been exhausted.
+// --------------------------------------------------
+bool loraUplinkAllowed()
+{
+  uint32_t now = millis();
+
+  // Start (or reset) the 60-second window.
+  // loraTxWindowActive is used instead of relying on a 0 timestamp, because
+  // millis() is legitimately 0 (or near it) right after boot/reset.
+  if (!loraTxWindowActive || now - loraTxWindowStartMillis >= 60000UL)
+  {
+    loraTxWindowStartMillis = now;
+    loraTxWindowActive = true;
+    loraTxWindowCount = 0;
+  }
+
+  // Minimum interval since the previous uplink (except the very first one).
+  if (loraTxHasSent && now - loraTxLastMillis < LORA_TX_MIN_INTERVAL_MS)
+  {
+    xSemaphoreTake(SerialMutex, portMAX_DELAY);
+    Serial.println("[LORA RATE] Uplink skipped: min interval not reached");
+    xSemaphoreGive(SerialMutex);
+    return false;
+  }
+
+  // Per-minute budget.
+  if (loraTxWindowCount >= LORA_TX_MAX_PER_MIN)
+  {
+    xSemaphoreTake(SerialMutex, portMAX_DELAY);
+    Serial.println("[LORA RATE] Uplink skipped: 60s budget exhausted");
+    xSemaphoreGive(SerialMutex);
+    return false;
+  }
+
+  loraTxLastMillis = now;
+  loraTxHasSent = true;
+  loraTxWindowCount++;
+  return true;
+}
+
 
 // --------------------------------------------------
 // Convert ASCII string to HEX
@@ -193,6 +290,22 @@ bool sendString(String message, int port)
     return false;
   }
 
+  // v2.1.0 - sanitize outbound message the same way downlinks are sanitized
+  message = loraSanitize(message);
+  if (message.length() == 0)
+  {
+    xSemaphoreTake(SerialMutex, portMAX_DELAY);
+    Serial.println("LoRa payload empty after sanitize, skip");
+    xSemaphoreGive(SerialMutex);
+    return false;
+  }
+
+  // v2.1.0 - enforce TX rate limiter (min interval + per-minute budget)
+  if (!loraUplinkAllowed())
+  {
+    return false;
+  }
+
   // Small gap to avoid spamming
   vTaskDelay(pdMS_TO_TICKS(100));
 
@@ -322,6 +435,18 @@ void processLoRaLine(String line)
     return;
   }
 
+  // v2.1.0 - sanitize decoded payload before any routing: strip control /
+  // non-ASCII characters, trim and cap. Prevents blank/oversized/malformed
+  // frames from reaching topic dispatchers.
+  message = loraSanitize(message);
+  if (message.length() == 0)
+  {
+    xSemaphoreTake(SerialMutex, portMAX_DELAY);
+    Serial.println("RX payload empty after sanitize, drop");
+    xSemaphoreGive(SerialMutex);
+    return;
+  }
+
   // Message format from Python bridge: <ClientID>/<TOPIC>:<PAYLOAD>
   // Example: 901745858428/ACK_DASHBOARD:OK  or 901745858428/MODE:*RM-ST#
   String topic = "";
@@ -340,7 +465,17 @@ void processLoRaLine(String line)
     payload = "";
   }
 
+  // v2.1.0 - a ':' inside the topic would corrupt routing; reject malformed
+  // frames instead of forwarding them to _receive_message_process().
   topic.trim();
+  if (topic.indexOf(':') >= 0)
+  {
+    xSemaphoreTake(SerialMutex, portMAX_DELAY);
+    Serial.print("RX topic contains separator, drop: ");
+    Serial.println(topic);
+    xSemaphoreGive(SerialMutex);
+    return;
+  }
   payload.trim();
 
   xSemaphoreTake(SerialMutex, portMAX_DELAY);

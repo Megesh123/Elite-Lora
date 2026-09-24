@@ -2,6 +2,8 @@
  * LORA COMMUNICATION HEADER
  * Defines interface for LoRa messaging and IoT connectivity
  * Handles LoRaWAN communication, topic management, and message processing
+ *
+ * v2.1.0 - TX rate limiting + input sanitization (see LoraFunction.cpp)
  **********************/
 
 #ifndef __LORA_FUNCTION_H__
@@ -143,6 +145,8 @@ bool loraJoin();
 
 void loraReceiveProcess();         // Drain LoRaSerial and dispatch complete downlink lines
 void processLoRaLine(String line); // Process a complete downlink line from LoRaSerial
+String loraSanitize(String input); // v2.1.0 Remove control/non-ASCII chars, trim, cap length
+bool loraUplinkAllowed();          // v2.1.0 Rate-limit gate for outgoing uplinks
 extern bool LoraInitialized;       // Flag to indicate if LoRa is initialized
 extern bool LoraJoined;            // Flag to indicate if LoRa network join succeeded
 
