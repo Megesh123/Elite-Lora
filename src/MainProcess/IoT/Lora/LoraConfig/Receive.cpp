@@ -1,45 +1,14 @@
 /**
- * @file Receive.cpp
+ * @file Main.cpp
  * @author Megeshwaran D <megesh@bfes.co.in>
- * @version 2.0.0 - Robust RX handling
+ * @version 1.0.0
+ * @date 2025-10-01
+ * @copyright Copyright (c) 2025 [Blackfox Embedded Solutions]
+ *
+ * @note LoRa message receiving and processing functions
  */
 
 #include "Headerfile.h"
-
-/**********************
- * Helper: check if topic matches expected (exact or suffix)
- * This handles both cases:
- *  - "9017.../ACK_DASHBOARD" exact match
- *  - "/ACK_DASHBOARD" suffix match (if ClientID stripped)
- **********************/
-static bool topicMatches(const String &incoming, const String &expectedFull)
-{
-  if (incoming == expectedFull) return true;
-  // expectedFull is like "CLIENTID/ACK_DASHBOARD", extract suffix "/ACK_DASHBOARD"
-  int slash = expectedFull.indexOf('/');
-  if (slash >= 0)
-  {
-    String suffix = expectedFull.substring(slash); // "/ACK_DASHBOARD"
-    if (incoming.endsWith(suffix)) return true;
-    // Also handle incoming without leading slash: "ACK_DASHBOARD"
-    if (incoming == suffix.substring(1)) return true;
-  }
-  else
-  {
-    if (incoming.endsWith(expectedFull)) return true;
-  }
-  return false;
-}
-
-static bool topicIs(const String &incoming, const char *suffix)
-{
-  String s = suffix;
-  if (incoming == s) return true;
-  if (incoming.endsWith(s)) return true;
-  // Remove leading slash for comparison
-  if (s.startsWith("/") && incoming.endsWith(s.substring(1))) return true;
-  return false;
-}
 
 /**********************
  * LORA MESSAGE PROCESSOR
@@ -47,142 +16,85 @@ static bool topicIs(const String &incoming, const char *suffix)
  **********************/
 void _receive_message_process(String topic, String payload)
 {
-  topic.trim();
-  payload.trim();
 
-  xSemaphoreTake(SerialMutex, portMAX_DELAY);
-  Serial.print("[RX PROCESS] Topic='");
-  Serial.print(topic);
-  Serial.print("' Payload='");
-  Serial.print(payload);
-  Serial.println("'");
-  xSemaphoreGive(SerialMutex);
-
-  // Always allow CONMODE even in offline mode
-  if (topicMatches(topic, LoraTopics.ConMode_return) || topicIs(topic, "/ACK_CONMODE") || topicIs(topic, "/CONMODE"))
+  if (!LoraDetails.UserEnterOfflineMode)
   {
-    Received._conmode = payload;
-    // Reset connection counters on any valid downlink
-    LoraDetails.lora_connected_but_not_received = 0;
-    LoraDetails.DashboardAckPending = false;
-    return;
-  }
-
-  if (LoraDetails.UserEnterOfflineMode)
-  {
-    xSemaphoreTake(SerialMutex, portMAX_DELAY);
-    Serial.println("[RX PROCESS] Offline mode, ignoring non-CONMODE");
-    xSemaphoreGive(SerialMutex);
-    return;
-  }
-
-  // Exact and suffix matching to be robust against ClientID variations
-  if (topicMatches(topic, LoraTopics.Dashboard_return) || topicIs(topic, "/ACK_DASHBOARD"))
-  {
-    LoraDetails.lora_connected_but_not_received = 0;
-    LoraDetails.DashboardAckPending = false;
-    xSemaphoreTake(SerialMutex, portMAX_DELAY);
-    Serial.println("[RX] Dashboard ACK received");
-    xSemaphoreGive(SerialMutex);
-  }
-  else if (topicMatches(topic, LoraTopics.offline_return) || topicIs(topic, "/ASK_OFFLINE"))
-  {
-    Received._offline_data_process = payload;
-  }
-  else if (topicMatches(topic, LoraTopics.subscribe) || topicIs(topic, "/APP"))
-  {
-    Received._setting_data_process = payload;
-  }
-  else if (topicMatches(topic, LoraTopics.alert_return) || topicIs(topic, "/ACK_ALERT"))
-  {
-    Received._alert_data_process = payload;
-  }
-  else if (topicMatches(topic, LoraTopics.alert_clear) || topicIs(topic, "/ALERTRECTIFIED") || topicIs(topic, "/ASK_ALERTRECTIFIED"))
-  {
-    Received._alert_clear_process = payload;
-  }
-  else if (topicMatches(topic, LoraTopics.LiveController_return) || topicIs(topic, "/ASK_LIVE"))
-  {
-    Received._controller_online_came_return = payload;
-  }
-  else if (topicMatches(topic, LoraTopics.Setting_return) || topicIs(topic, "/ACK_CON_SDP"))
-  {
-    Received._Setting = payload;
-  }
-  else if (topicMatches(topic, LoraTopics.Mode) || topicIs(topic, "/MODE"))
-  {
-    Received._mode = payload;
-    LoraDetails.lora_connected_but_not_received = 0;
-  }
-  else if (topicMatches(topic, LoraTopics.ConMode) || topicIs(topic, "/CONMODE"))
-  {
-    // Some app versions send CONMODE without ACK prefix for commands
-    Received._conmode = payload;
-  }
-  // Handle other ACK topics that Python auto-returns - at least reset counters
-  else if (topicIs(topic, "/ACK_APP") ||
-           topicIs(topic, "/ACK_FACTORYRESET") ||
-           topicIs(topic, "/ACK_REFILL") ||
-           topicIs(topic, "/ACKREFILLMODE") ||
-           topicIs(topic, "/ACK_TESTRUN") ||
-           topicIs(topic, "/ASK_SLEEPMODE") ||
-           topicIs(topic, "/ASK_RECONFIG") ||
-           topicIs(topic, "/ASK_SNOOZE") ||
-           topicIs(topic, "/ACK_PUMP") ||
-           topicIs(topic, "/ACK_SUPERVISORY") ||
-           topicIs(topic, "/ACK_REFILLALERT") ||
-           topicIs(topic, "/ACK_CONMODE"))
-  {
-    xSemaphoreTake(SerialMutex, portMAX_DELAY);
-    Serial.print("[RX] Generic ACK received: ");
-    Serial.println(topic);
-    xSemaphoreGive(SerialMutex);
-    LoraDetails.lora_connected_but_not_received = 0;
-    // If payload is OK, treat as success
-    if (payload == "OK")
+    // Exact full-topic match. indexOf()/substring matching mis-routed messages
+    // whenever one topic string was a substring of another (e.g. "/MODE" inside
+    // "/ACK_CONMODE"); the first matching branch would win.
+    if (topic == LoraTopics.Dashboard_return)
     {
-      // For generic ACKs, we can store as Setting or conmode if needed
-      // Dashboard already handled, others just log
+      LoraDetails.lora_connected_but_not_received = 0;
+      LoraDetails.DashboardAckPending = false;
+    }
+    else if (topic == LoraTopics.offline_return)
+    {
+      Received._offline_data_process = payload;
+    }
+    else if (topic == LoraTopics.subscribe) // App command topic
+    {
+      Received._setting_data_process = payload;
+    }
+    else if (topic == LoraTopics.alert_return) // Alert return topic
+    {
+      Received._alert_data_process = payload;
+    }
+    else if (topic == LoraTopics.alert_clear) // Alert clear topic
+    {
+      Received._alert_clear_process = payload;
+    }
+    else if (topic == LoraTopics.LiveController_return) // Live controller return topic
+    {
+      Received._controller_online_came_return = payload;
+    }
+    else if (topic == LoraTopics.Setting_return) // Setting topic
+    {
+      Received._Setting = payload;
+    }
+    else if (topic == LoraTopics.Mode)
+    {
+      Received._mode = payload;
+    }
+    else if (topic == LoraTopics.ConMode_return)
+    {
+      Received._conmode = payload;
     }
   }
   else
   {
-    xSemaphoreTake(SerialMutex, portMAX_DELAY);
-    Serial.print("[RX] UNKNOWN TOPIC: ");
-    Serial.println(topic);
-    xSemaphoreGive(SerialMutex);
-    // Fallback: if topic contains MODE, treat as MODE command (robustness)
-    if (topic.indexOf("/MODE") >= 0 || topic == "MODE")
+    if (topic == LoraTopics.ConMode_return)
     {
-      Received._mode = payload;
+      Received._conmode = payload;
     }
   }
 }
 
 void Receive()
 {
+  // Placeholder for additional receive handler 1
   if (Received._offline_data_process != "")
   {
+    // _offline_data_process(Received._offline_data_process); // Handle offline data transmission
     Received._offline_data_process = "";
   }
   if (Received._setting_data_process != "")
   {
-    _setting_data_process(Received._setting_data_process);
+    _setting_data_process(Received._setting_data_process); // Process system configuration data
     Received._setting_data_process = "";
   }
   if (Received._alert_data_process != "")
   {
-    _alert_data_process(Received._alert_data_process);
+    _alert_data_process(Received._alert_data_process); // Handle alert acknowledgments
     Received._alert_data_process = "";
   }
   if (Received._alert_clear_process != "")
   {
-    _alert_clear_process(Received._alert_clear_process);
+    _alert_clear_process(Received._alert_clear_process); // Process alert clearance commands
     Received._alert_clear_process = "";
   }
   if (Received._controller_online_came_return != "")
   {
-    _controller_online_came_return(Received._controller_online_came_return);
+    _controller_online_came_return(Received._controller_online_came_return); // Handle controller status
     Received._controller_online_came_return = "";
   }
   if (Received._Setting != "")
@@ -196,40 +108,29 @@ void Receive()
   }
   if (Received._mode != "")
   {
-    xSemaphoreTake(SerialMutex, portMAX_DELAY);
-    Serial.print("[RECEIVE] Processing MODE payload: ");
-    Serial.println(Received._mode);
-    xSemaphoreGive(SerialMutex);
-
-    _refillMode_start_stop(Received._mode);
-    _testRun_start_stop(Received._mode);
-    _controller_sleep_process(Received._mode);
-    _control_Snooze(Received._mode);
-    _app_online_offline_check(Received._mode);
-    _refill_complete_process(Received._mode);
-    _factory_reset_process(Received._mode);
-    _reconfig_process(Received._mode);
+    _refillMode_start_stop(Received._mode);    // Handle refill mode control
+    _testRun_start_stop(Received._mode);       // Process test run commands
+    _controller_sleep_process(Received._mode); // Process sleep mode commands
+    _control_Snooze(Received._mode);           // Handle alert snooze commands
+    _app_online_offline_check(Received._mode); // Handle app status checks
+    _refill_complete_process(Received._mode);  // Process refill completion
+    _factory_reset_process(Received._mode);    // Handle factory reset commands
+    _reconfig_process(Received._mode);         // Process system reconfiguration
     _refill_alert_enable_disable(Received._mode);
-    _supervisory_Enable_Disable(Received._mode);
+    _supervisory_Enable_Disable(Received._mode); // Handle supervisory level enable/disable commands
 
     Received._mode = "";
   }
 
   if (Received._conmode != "")
   {
-    xSemaphoreTake(SerialMutex, portMAX_DELAY);
-    Serial.print("[RECEIVE] CONMODE payload: ");
-    Serial.println(Received._conmode);
-    xSemaphoreGive(SerialMutex);
-
-    if (Received._conmode == "OK" || Received._conmode.indexOf("OK") >= 0)
+    if (Received._conmode == "OK")
     {
       Twoway.Return();
     }
     else
     {
-      Serial.println("CON MODE - UNKNOWN, still calling Return for robustness");
-      Twoway.Return();
+      Serial.println("CON MODE - UNKNOW");
     }
     Received._conmode = "";
   }
