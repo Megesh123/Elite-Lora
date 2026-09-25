@@ -60,7 +60,7 @@ SemaphoreHandle_t LoRaSerialMutex = NULL;
 // minimum inter-uplink gap and a per-minute message budget.
 // --------------------------------------------------
 #define LORA_TX_MIN_INTERVAL_MS 2000 // Minimum gap between two uplinks
-#define LORA_TX_MAX_PER_MIN 15       // Max uplinks allowed per 60s window
+#define LORA_TX_MAX_PER_MIN 15       // Max uplinks allowed in 60s window
 
 // Sliding 60-second window bookkeeping (millis() based - resets on boot)
 static uint32_t loraTxLastMillis = 0;
@@ -1074,7 +1074,6 @@ bool loraJoin()
       SerialMutex,
       portMAX_DELAY);
 
-  Serial.println();
   Serial.println(
       "LORAWAN JOIN TIMEOUT");
 
