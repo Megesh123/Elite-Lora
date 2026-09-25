@@ -44,9 +44,6 @@ void LoRaFunction::OverloadAlert()
     LoRa.alert(buffer);           // Send alert via LoRa
     vTaskDelay(pdMS_TO_TICKS(1)); // Yield to other tasks with a delay of 1 milliseconds
 
-    LoRa.NEXUS_IN_ALERT(NexuxInAlert.OVERLOAD); // Send Nexus alert
-    vTaskDelay(pdMS_TO_TICKS(1));               // Short delay for processing
-
     LoRa.liveProcess_Alert();        // Update live data process
     vTaskDelay(pdMS_TO_TICKS(1000)); // Delay for message processing
   }
@@ -67,10 +64,8 @@ void LoRaFunction::ReservoirLowLevelAlert()
     LoRa.alert(buffer);           // Send alert via LoRa
     vTaskDelay(pdMS_TO_TICKS(1)); // Short delay for processing
 
-    LoRa.liveProcess_Alert();                              // Update live data process
-    vTaskDelay(pdMS_TO_TICKS(1));                          // Short delay for processing
-    LoRa.NEXUS_IN_ALERT(NexuxInAlert.RESERVOIR_LOW_LEVEL); // Send Nexus alert
-    vTaskDelay(pdMS_TO_TICKS(1000));                       // Delay for message processing
+    LoRa.liveProcess_Alert();        // Update live data process
+    vTaskDelay(pdMS_TO_TICKS(1000)); // Delay for message processing
   }
 }
 
@@ -84,9 +79,7 @@ void LoRaFunction::SignalNotDetected()
     LoRa.alert(buffer);           // Send alert via LoRa
     vTaskDelay(pdMS_TO_TICKS(1)); // Short delay for processing
 
-    LoRa.liveProcess_Alert();     // Update live data process
-    vTaskDelay(pdMS_TO_TICKS(1)); // Update live data process
-    LoRa.NEXUS_IN_ALERT(NexuxInAlert.SND);
+    LoRa.liveProcess_Alert();        // Update live data process
     vTaskDelay(pdMS_TO_TICKS(1000)); // Delay for message processing
   }
 }
@@ -119,10 +112,8 @@ void LoRaFunction::_supervisory1_Alert()
     LoRa.alert(buffer);           // Send alert via LoRa
     vTaskDelay(pdMS_TO_TICKS(1)); // Short delay for processing
 
-    LoRa.liveProcess_Alert();                      // Update live data process
-    vTaskDelay(pdMS_TO_TICKS(1));                  // Short delay for processing
-    LoRa.NEXUS_IN_ALERT(NexuxInAlert.SUPERVISORY); // Send Nexus alert
-    vTaskDelay(pdMS_TO_TICKS(1000));               // Delay for message processing
+    LoRa.liveProcess_Alert();        // Update live data process
+    vTaskDelay(pdMS_TO_TICKS(1000)); // Delay for message processing
   }
 }
 
@@ -140,10 +131,8 @@ void LoRaFunction::_supervisory2_Alert()
     LoRa.alert(buffer);           // Send alert via LoRa
     vTaskDelay(pdMS_TO_TICKS(1)); // Short delay for processing
 
-    LoRa.liveProcess_Alert();                      // Update live data process
-    vTaskDelay(pdMS_TO_TICKS(1));                  // Short delay for processing
-    LoRa.NEXUS_IN_ALERT(NexuxInAlert.SUPERVISORY); // Send Nexus alert
-    vTaskDelay(pdMS_TO_TICKS(1000));               // Delay for message processing
+    LoRa.liveProcess_Alert();        // Update live data process
+    vTaskDelay(pdMS_TO_TICKS(1000)); // Delay for message processing
   }
 }
 
@@ -162,10 +151,8 @@ void LoRaFunction::_supervisory3_Alert()
     LoRa.alert(buffer);           // Send alert via LoRa
     vTaskDelay(pdMS_TO_TICKS(1)); // Short delay for processing
 
-    LoRa.liveProcess_Alert();                      // Update live data process
-    vTaskDelay(pdMS_TO_TICKS(1));                  // Short delay for processing
-    LoRa.NEXUS_IN_ALERT(NexuxInAlert.SUPERVISORY); // Send Nexus alert
-    vTaskDelay(pdMS_TO_TICKS(1000));               // Delay for message processing
+    LoRa.liveProcess_Alert();        // Update live data process
+    vTaskDelay(pdMS_TO_TICKS(1000)); // Delay for message processing
   }
 }
 
@@ -198,10 +185,8 @@ void LoRaFunction::_pumpElement1_Weak()
     LoRa.alert(buffer);           // Send alert via LoRa
     vTaskDelay(pdMS_TO_TICKS(1)); // Short delay for processing
 
-    LoRa.liveProcess_Alert();                    // Update live data process
-    vTaskDelay(pdMS_TO_TICKS(1));                // Short delay for processing
-    LoRa.NEXUS_IN_ALERT(NexuxInAlert.PUMP_WEAK); // Send Nexus alert
-    vTaskDelay(pdMS_TO_TICKS(1000));             // Delay for message processing
+    LoRa.liveProcess_Alert();        // Update live data process
+    vTaskDelay(pdMS_TO_TICKS(1000)); // Delay for message processing
   }
 }
 
@@ -219,10 +204,8 @@ void LoRaFunction::_pumpElement2_Weak()
     LoRa.alert(buffer);           // Send alert via LoRa
     vTaskDelay(pdMS_TO_TICKS(1)); // Short delay for processing
 
-    LoRa.liveProcess_Alert();                    // Update live data process
-    vTaskDelay(pdMS_TO_TICKS(1));                // Short delay for processing
-    LoRa.NEXUS_IN_ALERT(NexuxInAlert.PUMP_WEAK); // Send Nexus alert
-    vTaskDelay(pdMS_TO_TICKS(1000));             // Delay for message processing
+    LoRa.liveProcess_Alert();        // Update live data process
+    vTaskDelay(pdMS_TO_TICKS(1000)); // Delay for message processing
   }
 }
 
@@ -240,10 +223,8 @@ void LoRaFunction::_pumpElement3_Weak()
     LoRa.alert(buffer);           // Send alert via LoRa
     vTaskDelay(pdMS_TO_TICKS(1)); // Short delay for processing
 
-    LoRa.liveProcess_Alert();                    // Update live data process
-    vTaskDelay(pdMS_TO_TICKS(1));                // Short delay for processing
-    LoRa.NEXUS_IN_ALERT(NexuxInAlert.PUMP_WEAK); // Send Nexus alert
-    vTaskDelay(pdMS_TO_TICKS(1000));             // Delay for message processing
+    LoRa.liveProcess_Alert();        // Update live data process
+    vTaskDelay(pdMS_TO_TICKS(1000)); // Delay for message processing
   }
 }
 

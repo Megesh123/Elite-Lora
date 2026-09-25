@@ -351,10 +351,34 @@ long AlertPublishTime = 0; // Variable to track last alert publish time
 
 void ALERTFUNCTION::LoraPublishAlert()
 {
-    if (!Alert.Enable || start_init != 1)
-        return; // Do not publish alerts if system is not initialized or alert is not enabled
+    // Alert.Lora.DataSend is set by the ACK_ALERT downlink and was only
+    // cleared by ResetProcess(). LCD reset, refill, setting and reconfig
+    // clear Alert.Enable without it, so every later alert stayed silent.
+    // Detect a new alert here (rising edge or different name) and re-arm.
+    static bool alertWasActive = false;
+    static char lastAlertName[sizeof(Alert.Name)] = "";
 
-    if (millis() - AlertPublishTime > 10000) // Check if 10 seconds have passed since last alert publish
+    if (!Alert.Enable || start_init != 1)
+    {
+        alertWasActive = false; // Next alert is a new one
+        return;                 // Do not publish alerts if system is not initialized or alert is not enabled
+    }
+
+    char currentName[sizeof(Alert.Name)];
+    STATE_LOCK();
+    strlcpy(currentName, Alert.Name, sizeof(currentName));
+    STATE_UNLOCK();
+
+    bool newAlert = false;
+    if (!alertWasActive || strcmp(currentName, lastAlertName) != 0)
+    {
+        alertWasActive = true;
+        strlcpy(lastAlertName, currentName, sizeof(lastAlertName));
+        Alert.Lora.DataSend = false; // Re-arm: send until ACK_ALERT arrives
+        newAlert = true;             // Send now, don't wait for the 10s gap
+    }
+
+    if (newAlert || millis() - AlertPublishTime > 10000) // Check if 10 seconds have passed since last alert publish
     {
         AlertPublishTime = millis(); // Update last publish time
 

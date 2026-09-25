@@ -25,6 +25,19 @@
  *    drop anything over 100 and still transmit 71-100 byte frames, which the
  *    RAK11160 AT+SEND path rejects. Oversized frames are now truncated to 70
  *    and sent.
+ *
+ * @note v2.2.0 changes:
+ *  - Root cause of AT_PARAM_ERROR: after join the module sits at DR0 (SF12),
+ *    where IN865 allows only 51 bytes. Post-join config now forces
+ *    AT+CFM=0 / AT+ADR=0 / AT+DR=3 (SF9, 115 bytes) and the payload budget is
+ *    115, so 80-byte TOTALDISCHARGE frames go out whole.
+ *  - Unconfirmed uplinks: confirmed mode kept the radio busy waiting for ACKs
+ *    and retries, which caused AT_BUSY_ERROR on the next send.
+ *  - sendString() retries on AT_BUSY_ERROR, treats AT_COMMAND_NOT_FOUND and
+ *    +EVT:SEND_CONFIRMED_FAILED as errors, and no longer discards pending
+ *    UART lines before AT+SEND (Class C downlinks are dispatched instead).
+ *  - Rate limiter waits for the minimum interval instead of dropping the
+ *    uplink.
  */
 
 /**********************
@@ -42,10 +55,16 @@ HardwareSerial LoRaSerial(1);
 
 #define LORA_BAUD 115200
 
-// v2.1.1 - application payload budget for RAK11160 AT+SEND (port 2).
-// 70 bytes is the longest frame this link will accept. Longer frames are
-// truncated (not dropped) on both uplink and decoded downlink.
-#define LORA_MAX_PAYLOAD_LEN 70
+// v2.2.0 - application payload budget for RAK11160 AT+SEND (port 2).
+// Must match LORA_DATA_RATE. IN865 limits: DR0-DR2 = 51, DR3 = 115,
+// DR4-DR5 = 242 bytes. If you lower the DR for range, lower this too.
+#define LORA_DATA_RATE 3
+#define LORA_MAX_PAYLOAD_LEN 115
+
+// Retries when the module reports AT_BUSY_ERROR (previous TX still in its
+// RX windows).
+#define LORA_TX_BUSY_RETRIES 3
+#define LORA_TX_BUSY_RETRY_DELAY_MS 1500
 
 bool LoraInitialized = false;
 bool LoraJoined = false;
@@ -59,7 +78,7 @@ SemaphoreHandle_t LoRaSerialMutex = NULL;
 // back-to-back uplinks get dropped server-side silently. Enforce both a
 // minimum inter-uplink gap and a per-minute message budget.
 // --------------------------------------------------
-#define LORA_TX_MIN_INTERVAL_MS 2000 // Minimum gap between two uplinks
+#define LORA_TX_MIN_INTERVAL_MS 3000 // Minimum gap between two uplinks
 #define LORA_TX_MAX_PER_MIN 15       // Max uplinks allowed in 60s window
 
 // Sliding 60-second window bookkeeping (millis() based - resets on boot)
@@ -76,7 +95,7 @@ void processLoRaLine(String line);
 // v2.1.1 Sanitize a string before it is processed:
 //  - strip control characters and bytes >= 0x7F (keeps printable ASCII, 0x20-0x7E)
 //  - trim leading/trailing whitespace
-//  - truncate to LORA_MAX_PAYLOAD_LEN (70) so oversized frames are still
+//  - truncate to LORA_MAX_PAYLOAD_LEN (115) so oversized frames are still
 //    usable instead of being dropped or rejected by AT+SEND
 // --------------------------------------------------
 String loraSanitize(String input)
@@ -114,6 +133,15 @@ String loraSanitize(String input)
 // --------------------------------------------------
 bool loraUplinkAllowed()
 {
+  // v2.2.0 - wait out the minimum interval instead of dropping the uplink;
+  // skipped frames were lost data (alerts, CON_SDP, TOTALDISCHARGE).
+  if (loraTxHasSent)
+  {
+    uint32_t elapsed = millis() - loraTxLastMillis;
+    if (elapsed < LORA_TX_MIN_INTERVAL_MS)
+      vTaskDelay(pdMS_TO_TICKS(LORA_TX_MIN_INTERVAL_MS - elapsed));
+  }
+
   uint32_t now = millis();
 
   // Start (or reset) the 60-second window.
@@ -124,15 +152,6 @@ bool loraUplinkAllowed()
     loraTxWindowStartMillis = now;
     loraTxWindowActive = true;
     loraTxWindowCount = 0;
-  }
-
-  // Minimum interval since the previous uplink (except the very first one).
-  if (loraTxHasSent && now - loraTxLastMillis < LORA_TX_MIN_INTERVAL_MS)
-  {
-    xSemaphoreTake(SerialMutex, portMAX_DELAY);
-    Serial.println("[LORA RATE] Uplink skipped: min interval not reached");
-    xSemaphoreGive(SerialMutex);
-    return false;
   }
 
   // Per-minute budget.
@@ -209,6 +228,74 @@ static bool loraTryDispatchDownlink(const String &line)
   return false;
 }
 
+// --------------------------------------------------
+// v2.2.0 Consume lines already waiting on the UART (caller holds
+// LoRaSerialMutex). Downlinks are dispatched, everything else is dropped.
+// --------------------------------------------------
+static void loraDrainPending()
+{
+  while (LoRaSerial.available())
+  {
+    String line = LoRaSerial.readStringUntil('\n');
+    line.trim();
+    if (line.length() > 0)
+      loraTryDispatchDownlink(line);
+  }
+}
+
+// --------------------------------------------------
+// v2.2.0 Wait for the result of an AT+SEND (caller holds LoRaSerialMutex).
+// Returns 0 = TX done, 1 = AT_BUSY_ERROR (caller may retry),
+//         2 = hard error or timeout.
+// --------------------------------------------------
+static int loraWaitTxResult(uint32_t timeout)
+{
+  unsigned long start = millis();
+
+  while (millis() - start < timeout)
+  {
+    while (LoRaSerial.available())
+    {
+      String line = LoRaSerial.readStringUntil('\n');
+      line.trim();
+
+      if (line.length() == 0)
+        continue;
+
+      xSemaphoreTake(SerialMutex, portMAX_DELAY);
+      Serial.print("[LORA TX] ");
+      Serial.println(line);
+      xSemaphoreGive(SerialMutex);
+
+      // Task 8 may own the LoRa UART while waiting for TX_DONE.
+      // Do not discard a Class-C downlink if it arrives here.
+      if (loraTryDispatchDownlink(line))
+        continue;
+
+      if (line.indexOf("+EVT:TX_DONE") >= 0 ||
+          line.indexOf("+EVT:SEND_CONFIRMED_OK") >= 0)
+        return 0;
+
+      if (line.indexOf("AT_BUSY_ERROR") >= 0)
+        return 1;
+
+      if (line.indexOf("ERROR") >= 0 ||
+          line.indexOf("AT_COMMAND_NOT_FOUND") >= 0 ||
+          line.indexOf("AT_NO_NETWORK_JOINED") >= 0 ||
+          line.indexOf("+EVT:SEND_CONFIRMED_FAILED") >= 0)
+        return 2;
+    }
+
+    delay(1);
+  }
+
+  xSemaphoreTake(SerialMutex, portMAX_DELAY);
+  Serial.println("TX RESPONSE TIMEOUT");
+  xSemaphoreGive(SerialMutex);
+
+  return 2;
+}
+
 // ==================================================
 // Wait for a specific response
 // ==================================================
@@ -272,10 +359,12 @@ bool sendATCommand(
       if (response.indexOf("AT_PARAM_ERROR") >= 0 ||
           response.indexOf("AT_BUSY_ERROR") >= 0 ||
           response.indexOf("AT_NO_NETWORK_JOINED") >= 0 ||
+          response.indexOf("AT_COMMAND_NOT_FOUND") >= 0 ||
           response.indexOf("ERROR") >= 0)
       {
         Serial.println();
-        Serial.println("sendATCommand - Command ERROR");
+        Serial.print("sendATCommand - Command ERROR: ");
+        Serial.println(command);
 
         if (LoRaSerialMutex != NULL)
           xSemaphoreGive(LoRaSerialMutex);
@@ -387,161 +476,50 @@ bool sendString(String message, int port)
         LoRaSerialMutex,
         portMAX_DELAY);
 
-  while (LoRaSerial.available())
-    LoRaSerial.read();
+  // v2.2.0 - do not blindly flush: dispatch any Class C downlink that is
+  // already waiting, discard only late event lines (TX_DONE etc.).
+  loraDrainPending();
 
-  LoRaSerial.print(command);
-  LoRaSerial.print("\r\n");
+  // 0 = done, 1 = busy (retry), 2 = hard error / timeout
+  int result = 2;
 
-  bool sendAccepted = false;
-  bool txDone = false;
-
-  unsigned long start = millis();
-
-  while (millis() - start < 15000)
+  for (int attempt = 0; attempt <= LORA_TX_BUSY_RETRIES; attempt++)
   {
-    while (LoRaSerial.available())
+    if (attempt > 0)
     {
-      String line =
-          LoRaSerial.readStringUntil('\n');
-
-      line.trim();
-
-      if (line.length() == 0)
-        continue;
-
-      // ==============================
-      // Serial Monitor
-      // ==============================
-
-      xSemaphoreTake(
-          SerialMutex,
-          portMAX_DELAY);
-
-      Serial.print("[LORA TX] ");
-      Serial.println(line);
-
+      xSemaphoreTake(SerialMutex, portMAX_DELAY);
+      Serial.print("[LORA TX] busy, retry ");
+      Serial.println(attempt);
       xSemaphoreGive(SerialMutex);
 
-      // ==============================
-      // DOWNLINK RECEIVED DURING TX WAIT
-      // ==============================
-      // Task 8 may own the LoRa UART while waiting for TX_DONE.
-      // Do not discard a Class-C downlink if it arrives here.
-      if (line.startsWith("+EVT:RX_"))
-      {
-        processLoRaLine(line);
-        continue;
-      }
-
-      // ==============================
-      // SEND ACCEPTED
-      // ==============================
-
-      if (line == "OK")
-      {
-        sendAccepted = true;
-
-        // xSemaphoreTake(
-        //     SerialMutex,
-        //     portMAX_DELAY);
-
-        // Serial.println(
-        //     "SEND command accepted");
-
-        // xSemaphoreGive(SerialMutex);
-      }
-
-      // ==============================
-      // TX DONE
-      // ==============================
-
-      if (line.indexOf("+EVT:TX_DONE") >= 0)
-      {
-        txDone = true;
-
-        // xSemaphoreTake(
-        //     SerialMutex,
-        //     portMAX_DELAY);
-
-        // Serial.println("TX DONE");
-
-        // xSemaphoreGive(SerialMutex);
-      }
-
-      // ==============================
-      // CONFIRMED TX
-      // ==============================
-
-      if (line.indexOf(
-              "+EVT:SEND_CONFIRMED_OK") >= 0)
-      {
-        txDone = true;
-
-        // xSemaphoreTake(
-        //     SerialMutex,
-        //     portMAX_DELAY);
-
-        // Serial.println(
-        //     "TX CONFIRMED DONE");
-
-        // xSemaphoreGive(SerialMutex);
-      }
-
-      // ==============================
-      // ERROR
-      // ==============================
-
-      if (line.indexOf("AT_PARAM_ERROR") >= 0 ||
-          line.indexOf("AT_BUSY_ERROR") >= 0 ||
-          line.indexOf("AT_NO_NETWORK_JOINED") >= 0 ||
-          line.indexOf("ERROR") >= 0)
-      {
-        xSemaphoreTake(
-            SerialMutex,
-            portMAX_DELAY);
-
-        Serial.println(
-            "LoRa SEND ERROR");
-
-        xSemaphoreGive(SerialMutex);
-
-        if (LoRaSerialMutex != NULL)
-          xSemaphoreGive(
-              LoRaSerialMutex);
-
-        return false;
-      }
-
-      // ==============================
-      // TX COMPLETE
-      // ==============================
-
-      if (txDone)
-      {
-        if (LoRaSerialMutex != NULL)
-          xSemaphoreGive(
-              LoRaSerialMutex);
-
-        return true;
-      }
+      vTaskDelay(pdMS_TO_TICKS(LORA_TX_BUSY_RETRY_DELAY_MS));
+      loraDrainPending();
     }
 
-    delay(1);
+    LoRaSerial.print(command);
+    LoRaSerial.print("\r\n");
+
+    result = loraWaitTxResult(15000);
+
+    if (result != 1)
+      break;
   }
+
+  if (LoRaSerialMutex != NULL)
+    xSemaphoreGive(
+        LoRaSerialMutex);
+
+  if (result == 0)
+    return true;
 
   xSemaphoreTake(
       SerialMutex,
       portMAX_DELAY);
 
   Serial.println(
-      "TX RESPONSE TIMEOUT");
+      "LoRa SEND ERROR");
 
   xSemaphoreGive(SerialMutex);
-
-  if (LoRaSerialMutex != NULL)
-    xSemaphoreGive(
-        LoRaSerialMutex);
 
   return false;
 }
@@ -946,6 +924,25 @@ bool loraBegin()
   return true;
 }
 
+// --------------------------------------------------
+// v2.2.0 Radio settings applied after every successful join.
+//  - AT+CFM=0 : unconfirmed uplinks (the bridge answers with ACK_ downlinks),
+//               so the radio is free right after +EVT:TX_DONE.
+//  - AT+ADR=0 : keep the data rate fixed; ADR would drop back to DR0.
+//  - AT+DR    : DR3 = SF9 = 115 byte payload (DR0 only allows 51).
+// --------------------------------------------------
+static void loraConfigureAfterJoin()
+{
+  // Let the module finish printing the join events.
+  vTaskDelay(pdMS_TO_TICKS(500));
+
+  sendATCommand("AT+CFM=0");
+  sendATCommand("AT+ADR=0");
+
+  String dr = "AT+DR=" + String(LORA_DATA_RATE);
+  sendATCommand(dr.c_str());
+}
+
 bool loraJoin()
 {
   if (!LoraInitialized)
@@ -1036,11 +1033,15 @@ bool loraJoin()
         xSemaphoreGive(
             SerialMutex);
 
-        LoraJoined = true;
-
         if (LoRaSerialMutex != NULL)
           xSemaphoreGive(
               LoRaSerialMutex);
+
+        // v2.2.0 - post-join radio config. sendATCommand() takes
+        // LoRaSerialMutex itself, so it must run after the give above.
+        loraConfigureAfterJoin();
+
+        LoraJoined = true;
 
         return true;
       }
