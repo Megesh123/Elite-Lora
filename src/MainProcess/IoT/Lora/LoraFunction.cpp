@@ -150,7 +150,6 @@ bool loraUplinkAllowed()
   return true;
 }
 
-
 // --------------------------------------------------
 // Convert ASCII string to HEX
 // --------------------------------------------------
@@ -182,7 +181,8 @@ String hexToString(String hex)
     if ((c >= '0' && c <= '9') || (c >= 'A' && c <= 'F') || (c >= 'a' && c <= 'f'))
       clean += c;
   }
-  if (clean.length() % 2 != 0) return ""; // invalid
+  if (clean.length() % 2 != 0)
+    return ""; // invalid
 
   String result = "";
   result.reserve(clean.length() / 2);
@@ -307,53 +307,6 @@ bool sendATCommand(
   return false;
 }
 
-// --------------------------------------------------
-// Convert ASCII string to HEX
-// Example: "Hello" -> "48656C6C6F"
-// --------------------------------------------------
-String stringToHex(String text)
-{
-  String hex = "";
-
-  for (size_t i = 0; i < text.length(); i++)
-  {
-    char buf[3];
-
-    sprintf(
-        buf,
-        "%02X",
-        (uint8_t)text[i]);
-
-    hex += buf;
-  }
-
-  return hex;
-}
-// --------------------------------------------------
-// Convert HEX string to ASCII
-// Example: "48656C6C6F" -> "Hello"
-// --------------------------------------------------
-String hexToString(String hex)
-{
-  String result = "";
-
-  for (int i = 0; i < hex.length(); i += 2)
-  {
-    if (i + 1 >= hex.length())
-      break;
-
-    String byteString = hex.substring(i, i + 2);
-
-    char c = (char)strtol(
-        byteString.c_str(),
-        NULL,
-        16);
-
-    result += c;
-  }
-
-  return result;
-}
 // --------------------------------------------------
 // Send string through RAK11160
 // --------------------------------------------------

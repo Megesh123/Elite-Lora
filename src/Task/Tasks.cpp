@@ -333,7 +333,7 @@ void TaskFunction::LoraPublishTask(void *pvParameters)
       {
         AlertFun.LoraPublishAlert(); // Publish alert data via LoRa
         Grease.LoraLiveProcess();    // Publish live process data via LoRa
-        LoRa.NEXUS_ONLINE_UPDATE();  // Update Nexus online status
+                                     // LoRa.NEXUS_ONLINE_UPDATE();  // Update Nexus online status
 
         LoRa.OfflineSettingPageData();
         // LoRa.offlineDataStart(); // Handle offline data transmission
