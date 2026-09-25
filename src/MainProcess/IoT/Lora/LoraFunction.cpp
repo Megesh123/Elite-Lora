@@ -1,7 +1,7 @@
 /**
  * @file LoraFunction.cpp
  * @author Megeshwaran D <megesh@bfes.co.in>
- * @version 2.1.0 - TX rate limiting + input sanitization
+ * @version 2.1.1 - truncate payloads at 70 bytes
  * @date 2025-10-01
  *
  * @note LoRa COMMUNICATION IMPLEMENTATION - Fixed RX starvation & flush bug
@@ -18,6 +18,12 @@
  *  - loraUplinkAllowed(): TX rate limiter enforcing a minimum gap between
  *    uplinks and a per-minute duty-cycle cap so LoRaWAN airtime isn't spammed
  *    by concurrent publish calls.
+ *
+ * @note v2.1.1 changes:
+ *  - Application payload budget is 70 bytes, not 100. sendString() used to
+ *    drop anything over 100 and still transmit 71-100 byte frames, which the
+ *    RAK11160 AT+SEND path rejects. Oversized frames are now truncated to 70
+ *    and sent.
  */
 
 #include "HeaderFile.h"
@@ -29,9 +35,10 @@ HardwareSerial LoRaSerial(1);
 
 #define LORA_BAUD 115200
 
-// v2.1.0 - LoRaWAN payload budget for RAK11160 (AT+SEND on port 2).
-// App-level payloads are capped lower; this guards decoded downlinks too.
-#define LORA_MAX_PAYLOAD_LEN 100
+// v2.1.1 - application payload budget for RAK11160 AT+SEND (port 2).
+// 70 bytes is the longest frame this link will accept. Longer frames are
+// truncated (not dropped) on both uplink and decoded downlink.
+#define LORA_MAX_PAYLOAD_LEN 70
 
 bool LoraInitialized = false;
 bool LoraJoined = false;
@@ -59,10 +66,11 @@ static uint16_t loraTxWindowCount = 0;
 void processLoRaLine(String line);
 
 // --------------------------------------------------
-// v2.1.0 Sanitize a string before it is processed:
+// v2.1.1 Sanitize a string before it is processed:
 //  - strip control characters and bytes >= 0x7F (keeps printable ASCII, 0x20-0x7E)
 //  - trim leading/trailing whitespace
-//  - cap length so oversized / truncated frames can't be dispatched
+//  - truncate to LORA_MAX_PAYLOAD_LEN (70) so oversized frames are still
+//    usable instead of being dropped or rejected by AT+SEND
 // --------------------------------------------------
 String loraSanitize(String input)
 {
@@ -78,6 +86,15 @@ String loraSanitize(String input)
   }
   if (clean.length() > LORA_MAX_PAYLOAD_LEN)
   {
+    if (SerialMutex != NULL)
+    {
+      xSemaphoreTake(SerialMutex, portMAX_DELAY);
+      Serial.print("[LORA] payload truncated to ");
+      Serial.print(LORA_MAX_PAYLOAD_LEN);
+      Serial.print(" from ");
+      Serial.println(clean.length());
+      xSemaphoreGive(SerialMutex);
+    }
     clean = clean.substring(0, LORA_MAX_PAYLOAD_LEN);
   }
   return clean;
@@ -281,16 +298,9 @@ bool sendString(String message, int port)
     return false;
   }
 
-  if (message.length() > 100)
-  {
-    xSemaphoreTake(SerialMutex, portMAX_DELAY);
-    Serial.print("LoRa payload too large: ");
-    Serial.println(message.length());
-    xSemaphoreGive(SerialMutex);
-    return false;
-  }
-
-  // v2.1.0 - sanitize outbound message the same way downlinks are sanitized
+  // v2.1.1 - sanitize first. This strips non-ASCII and truncates to 70 bytes.
+  // v2.1.0 returned false here for length > 100, which discarded the uplink
+  // entirely; 71-100 byte frames were sent and then rejected by AT+SEND.
   message = loraSanitize(message);
   if (message.length() == 0)
   {
