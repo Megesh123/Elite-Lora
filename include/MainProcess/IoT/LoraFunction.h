@@ -3,7 +3,7 @@
  * Defines interface for LoRa messaging and IoT connectivity
  * Handles LoRaWAN communication, topic management, and message processing
  *
- * v2.1.0 - TX rate limiting + input sanitization (see LoraFunction.cpp)
+ * v2.1.1 - TX rate limiting + input sanitization; truncate payloads at 70 bytes
  **********************/
 
 #ifndef __LORA_FUNCTION_H__
@@ -145,7 +145,7 @@ bool loraJoin();
 
 void loraReceiveProcess();         // Drain LoRaSerial and dispatch complete downlink lines
 void processLoRaLine(String line); // Process a complete downlink line from LoRaSerial
-String loraSanitize(String input); // v2.1.0 Remove control/non-ASCII chars, trim, cap length
+String loraSanitize(String input); // v2.1.1 Remove control/non-ASCII chars, trim, truncate at 70
 bool loraUplinkAllowed();          // v2.1.0 Rate-limit gate for outgoing uplinks
 extern bool LoraInitialized;       // Flag to indicate if LoRa is initialized
 extern bool LoraJoined;            // Flag to indicate if LoRa network join succeeded

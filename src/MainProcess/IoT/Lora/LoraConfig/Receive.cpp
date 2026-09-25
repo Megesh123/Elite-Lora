@@ -44,8 +44,8 @@ static bool topicIs(const String &incoming, const char *suffix)
 /**********************
  * LORA MESSAGE PROCESSOR
  * Routes messages to appropriate handlers based on topic and payload
- * v2.1.0 - topic/payload sanitized on entry (defense in depth); processLoRaLine
- * already sanitizes, this guards any other callers of _receive_message_process.
+ * v2.1.1 - topic/payload sanitized on entry (defense in depth, truncated at 70);
+ * processLoRaLine already sanitizes, this guards any other callers.
  **********************/
 void _receive_message_process(String topic, String payload)
 {
